@@ -120,18 +120,22 @@ export class CricketHub {
       }
       try { data = (await this.refreshing) || data; } catch (e) { /* purana data hi dikhao */ }
     }
-    const body = data || { updated: null, matches: [] };
+    let body = data;
+    if (!body) {
+      const m = (await this.ctx.storage.get('meta')) || {};
+      body = { updated: null, matches: [], error: m.lastError || 'abhi data nahi aaya, 10 second baad dobara kholo', errorAt: m.lastErrorAt || null };
+    }
     return new Response(JSON.stringify(body), { headers: CORS });
   }
 
   async api(path, params, meta) {
-    const key = this.env.CRIC_API_KEY;
+    const key = String(this.env.CRIC_API_KEY || '').trim();
     if (!key) throw new Error('CRIC_API_KEY set nahi hai');
     const u = new URL('https://api.cricapi.com/v1/' + path);
     u.searchParams.set('apikey', key);
     Object.keys(params || {}).forEach(k => u.searchParams.set(k, params[k]));
     meta.hits++;
-    const r = await fetch(u);
+    const r = await fetch(u, { headers: { 'user-agent': 'TechPatraa-CricketWorker/1.0', accept: 'application/json' } });
     if (!r.ok) throw new Error(path + ' HTTP ' + r.status);
     const j = await r.json();
     if (j.status !== 'success') {
@@ -152,8 +156,8 @@ export class CricketHub {
     // Din ke hisaab se hits ka budget (UTC din): kul budget se zyada kabhi nahi
     const frac = (now - Date.parse(day + 'T00:00:00Z')) / 864e5;
     const allowed = Math.min(cfg.maxHits - cfg.reserve, cfg.maxHits * (frac + 0.35));
-    if (meta.blockedUntil && now < meta.blockedUntil) return prev;
-    if (meta.hits >= allowed) return prev;
+    if (meta.blockedUntil && now < meta.blockedUntil) { meta.lastError = 'API limit: thodi der ruk kar dobara koshish hogi'; meta.lastErrorAt = new Date().toISOString(); await this.ctx.storage.put('meta', meta); return prev; }
+    if (meta.hits >= allowed) { meta.lastError = 'aaj ke hits ka budget poora (kal subah naya milega)'; meta.lastErrorAt = new Date().toISOString(); await this.ctx.storage.put('meta', meta); return prev; }
 
     try {
       const cur = await this.api('currentMatches', { offset: 0 }, meta);
@@ -213,6 +217,8 @@ export class CricketHub {
       await this.ctx.storage.put('meta', meta);
       return out;
     } catch (e) {
+      meta.lastError = String((e && e.message) || e).slice(0, 200);
+      meta.lastErrorAt = new Date().toISOString();
       await this.ctx.storage.put('meta', meta);
       return prev;
     }
